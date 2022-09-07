@@ -1,0 +1,1085 @@
+---
+title: Variation of Volatile Organic Compound Levels within Ambient Room Air and its Impact upon the Standardisation of Breath Sampling
+author: "Simone Zuffa"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    theme: journal
+    fig_caption: yes
+---
+
+```{r Parameters, include = FALSE}
+
+# Set output directory
+save_dir <- "Figures" 
+if (!dir.exists(save_dir)) { stop(paste("save_dir", save_dir, "does not exist")) }
+
+```
+
+```{r Setup, include = FALSE}
+
+# Set up markdown file and required packages for the analysis
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, eval = TRUE, message = FALSE, results = FALSE, fig.show = 'hide')
+
+pkgs <- c("tidyverse", "ggpubr", "mixOmics", "RColorBrewer", "ropls", "plotly", "vegan", "rstatix", "patchwork")
+
+lapply(pkgs, require, character.only = TRUE)
+
+```
+
+```{r Data, include = FALSE}
+
+load("RoomAir.Rdata")
+
+```
+
+Adjust metadata 
+
+```{r}
+
+# Convert to full names
+data$SampleType <- gsub("b", "Breath", data$SampleType)
+data$SampleType <- gsub("ra", "Room Air", data$SampleType)
+
+data$Location <- gsub("LU", "liver research unit", data$Location)
+data$Location <- gsub("L", "mass spectrometry laboratory", data$Location)
+data$Location <- gsub("T", "main operating theatres", data$Location)
+data$Location <- gsub("P", "paterson building outpatient clinic", data$Location)
+data$Location <- gsub("E", "endoscopy unit", data$Location)
+
+# Convert variable of interest into factors
+data$Date <- as.factor(data$Date)
+data$SampleType <- factor(data$SampleType, levels = c("Room Air", "Breath"))
+data$Location <- as.factor(data$Location)
+data$Time <- as.factor(data$Time)
+
+# Replace zeroes with NA
+data <- replace(data, data == 0, NA)
+
+# Separate metadata information from metabolites
+metadata <- data[,1:5]
+metabolites <- data[,6:118]
+
+```
+
+Check total peak area acquired per sample
+
+```{r}
+
+# Total peak area
+metadata$PeakArea <- rowSums(metabolites, na.rm = TRUE)
+
+# Boxplot
+peakarea_plot <- metadata %>% 
+  mutate(Log_PeakArea = log2(PeakArea)) %>%
+  ggboxplot(x = "SampleType", y = "Log_PeakArea") 
+
+#ggplotly(peakarea_plot)
+
+# For Room Air eight strong outliers have been identified: ra26, ra27, ra29, ra30, ra33, ra34, ra180, ra185
+# For Breath one strong outlier has been identified: b54
+# This is probably due to injection problems
+
+# Remove outliers
+data_clean <- filter(data, !(data$SampleID %in% c("ra26", "ra27", "ra29", "ra30", "ra33","ra34", "ra180", "ra185", "b54")))
+
+metadata <- data_clean[,1:5]
+metabolites <- data_clean[,6:118]
+metadata$PeakArea <- rowSums(metabolites, na.rm = TRUE)
+
+# Boxplot
+peakarea_plot <- metadata %>% 
+  mutate(Log_PeakArea = log2(PeakArea)) %>%
+  ggboxplot(x = "SampleType", y = "Log_PeakArea") 
+
+#ggplotly(peakarea_plot)
+# one moderate outlier still present in room air
+
+```
+
+Check peak area distribution based on metadata
+
+```{r}
+
+# Density plot for metadata
+meta <- c("SampleType", "Location", "Time", "Date")
+
+for (i in meta) {
+  
+  p <- metadata %>%
+    mutate(Log_PeakArea = log2(PeakArea)) %>%
+    ggdensity("Log_PeakArea", y = "..density..", color = i, alpha = 0, legend = "right") +
+    theme(axis.text = element_text(size = 4), axis.title = element_text(size = 5), legend.title = element_text(size = 5),
+          legend.text = element_text(size = 4))
+  
+  assign(paste("DensityPlot_", i, sep = ""), p)
+  
+}
+
+DensityPlot_Meta <- ggarrange(DensityPlot_SampleType, DensityPlot_Location, 
+                              DensityPlot_Time, DensityPlot_Date, ncol = 2, nrow = 2)
+
+DensityPlot_DateType <- metadata %>%
+  mutate(Log_PeakArea = log2(PeakArea)) %>%
+  ggdensity("Log_PeakArea", y = "..density..", color = "SampleType", alpha = 0, legend = "right") +
+  facet_wrap("Date") + theme(axis.text = element_text(size = 4), axis.title = element_text(size = 5), 
+                             legend.title = element_text(size = 5), legend.text = element_text(size = 4))
+
+DensityPlot_TypeDate <- metadata %>%
+  mutate(Log_PeakArea = log2(PeakArea)) %>%
+  ggdensity("Log_PeakArea", y = "..density..", color = "Date", alpha = 0, legend = "right") +
+  facet_wrap("SampleType") + theme(axis.text = element_text(size = 4), axis.title = element_text(size = 5), 
+                                   legend.title = element_text(size = 5), legend.text = element_text(size = 4))
+
+```
+
+Breath samples have a higher total peak area compared to room air --> higher presence of VOCs
+Location does not seems to have any effect on total peak area.
+Difference in time due to the fact that no breath samples were collected in the afternoon.
+Distribution in the first two days (20200203 and 2020205) are different from the other days --> they have higher peak area.
+
+PCA raw data
+
+```{r}
+
+# PCA
+PCA_raw <- mixOmics::pca(metabolites, ncomp = 2, center = TRUE, scale = TRUE) 
+PCA_raw_scores <- data.frame(PCA_raw$variates$X, metadata)
+  
+PCA_raw_plot_samples <- PCA_raw_scores %>%
+  ggscatter(x = "PC1", y = "PC2",
+            color = "SampleType", alpha = 0.5,
+            xlab = paste("PC1 (", round(PCA_raw$prop_expl_var$X[1]*100, digits = 1),"%)", sep = ""), 
+            ylab = paste("PC2 (", round(PCA_raw$prop_expl_var$X[2]*100, digits = 1),"%)", sep = ""),
+            legend.title = "SampleType", ggtheme = theme_classic()) +
+  geom_point(data = PCA_raw_scores %>% group_by(SampleType) %>% 
+               summarise_at(vars(matches("PC")), mean), aes(PC1, PC2, color = SampleType), size = 3, shape = 8) +
+  theme(plot.title = element_text(size = 8), axis.title = element_text(size = 5), axis.text = element_text(size = 6),
+        legend.title = element_text(size = 6), legend.text = element_text(size = 5)) + coord_fixed()
+
+PCA_raw_plot_location <- PCA_raw_scores %>%
+  ggscatter(x = "PC1", y = "PC2",
+            color = "Location", alpha = 0.5,
+            xlab = paste("PC1 (", round(PCA_raw$prop_expl_var$X[1]*100, digits = 1),"%)", sep = ""), 
+            ylab = paste("PC2 (", round(PCA_raw$prop_expl_var$X[2]*100, digits = 1),"%)", sep = ""),
+            legend.title = "Location", ggtheme = theme_classic()) +
+  geom_point(data = PCA_raw_scores %>% group_by(Location) %>% 
+               summarise_at(vars(matches("PC")), mean), aes(PC1, PC2, color = Location), size = 3, shape = 8) +
+  theme(plot.title = element_text(size = 8), axis.title = element_text(size = 5), axis.text = element_text(size = 6),
+        legend.title = element_text(size = 6), legend.text = element_text(size = 5)) + coord_fixed()
+
+PCA_raw_plot_date <- PCA_raw_scores %>%
+  ggscatter(x = "PC1", y = "PC2",
+            color = "Date", alpha = 0.5,
+            xlab = paste("PC1 (", round(PCA_raw$prop_expl_var$X[1]*100, digits = 1),"%)", sep = ""), 
+            ylab = paste("PC2 (", round(PCA_raw$prop_expl_var$X[2]*100, digits = 1),"%)", sep = ""),
+            legend.title = "Date", ggtheme = theme_classic()) +
+  geom_point(data = PCA_raw_scores %>% group_by(Date) %>% 
+               summarise_at(vars(matches("PC")), mean), aes(PC1, PC2, color = Date), size = 3, shape = 8) +
+  theme(plot.title = element_text(size = 8), axis.title = element_text(size = 5), axis.text = element_text(size = 6),
+        legend.title = element_text(size = 6), legend.text = element_text(size = 5)) + coord_fixed()
+
+PCA_raw_plot_peakarea <- PCA_raw_scores %>%
+  ggscatter(x = "PC1", y = "PC2",
+            color = "PeakArea", alpha = 0.7,
+            xlab = paste("PC1 (", round(PCA_raw$prop_expl_var$X[1]*100, digits = 1),"%)", sep = ""), 
+            ylab = paste("PC2 (", round(PCA_raw$prop_expl_var$X[2]*100, digits = 1),"%)", sep = ""),
+            legend.title = "Tota Peak Area", ggtheme = theme_classic()) +
+  theme(plot.title = element_text(size = 8), axis.title = element_text(size = 5), axis.text = element_text(size = 6),
+        legend.title = element_text(size = 6), legend.text = element_text(size = 5)) + coord_fixed()
+
+PCA_raw_plot <- ggarrange(PCA_raw_plot_samples, PCA_raw_plot_location, 
+                          PCA_raw_plot_date, PCA_raw_plot_peakarea, ncol = 2, nrow = 2)
+
+```
+
+A clear separation between breath and room air can be observed.
+No strong differences between locations seem to be present.
+As expected, there are differences due to collection day.
+Total peak area is also driving PCA --> corrected with total area normalisation to fix this
+
+Total peak area normalisation
+
+```{r}
+
+# Total area normalisation
+sumSam <- rowSums(metabolites, na.rm = TRUE) 
+sumSam[which(sumSam == 0)] <- 0.0001
+metabolites_TA <- as.data.frame(metabolites/sumSam)
+
+```
+
+PCA with total area normalisation
+
+```{r}
+
+# PCA
+PCA_TA <- mixOmics::pca(metabolites_TA, ncomp = 2, center = TRUE, scale = TRUE) 
+PCA_TA_scores <- data.frame(PCA_TA$variates$X, metadata)
+
+# Plot PCA
+PCA_TA_plot_samples <- PCA_TA_scores %>%
+  ggscatter(x = "PC1", y = "PC2",
+            color = "SampleType", alpha = 0.5,
+            xlab = paste("PC1 (", round(PCA_TA$prop_expl_var$X[1]*100, digits = 1),"%)", sep = ""), 
+            ylab = paste("PC2 (", round(PCA_TA$prop_expl_var$X[2]*100, digits = 1),"%)", sep = ""),
+            legend.title = "SampleType", ggtheme = theme_classic()) +
+  geom_point(data = PCA_TA_scores %>% group_by(SampleType) %>% 
+               summarise_at(vars(matches("PC")), mean), aes(PC1, PC2, color = SampleType), size = 3, shape = 8) +
+  theme(plot.title = element_text(size = 8), axis.title = element_text(size = 5), axis.text = element_text(size = 6),
+        legend.title = element_text(size = 6), legend.text = element_text(size = 5)) + coord_fixed()
+
+# One strong outlier is detected in the room air group: ra165
+data_filter <- filter(data_clean, data_clean$SampleID != "ra165")
+metabolites_filter <- filter(metabolites_TA, metadata$SampleID != "ra165")
+metadata_filter <- filter(metadata, metadata$SampleID != "ra165")
+
+# PCA
+PCA_TA <- mixOmics::pca(metabolites_filter, ncomp = 2, center = TRUE, scale = TRUE) 
+PCA_TA_scores <- data.frame(PCA_TA$variates$X, metadata_filter)
+
+# Plot PCA
+PCA_TA_plot_SampleType <- PCA_TA_scores %>%
+  ggscatter(x = "PC1", y = "PC2",
+            color = "SampleType", alpha = 0.5,
+            xlab = paste("PC1 (", round(PCA_TA$prop_expl_var$X[1]*100, digits = 1),"%)", sep = ""), 
+            ylab = paste("PC2 (", round(PCA_TA$prop_expl_var$X[2]*100, digits = 1),"%)", sep = ""),
+            legend.title = "SampleType", ggtheme = theme_classic()) +
+  geom_point(data = PCA_TA_scores %>% group_by(SampleType) %>% 
+               summarise_at(vars(matches("PC")), mean), aes(PC1, PC2, color = SampleType), size = 3, shape = 8) +
+  theme(plot.title = element_text(size = 8), axis.title = element_text(size = 5), axis.text = element_text(size = 6),
+        legend.title = element_text(size = 6), legend.text = element_text(size = 5)) + coord_fixed()
+
+```
+
+Does log transformation improves the structure of the data?
+
+```{r}
+
+# Log transformation 
+metabolites_log <- log2(data_filter[,6:118])
+
+# Total area normalisation
+sumSam_log <- rowSums(metabolites_log, na.rm = TRUE)
+sumSam_log[which(sumSam_log == 0)] <- 0.0001
+metabolites_log_TA <- metabolites_log/sumSam_log
+
+# Generate PCA model
+PCA_final_log <- mixOmics::pca(metabolites_log_TA, ncomp = 2, center = TRUE, scale = TRUE) 
+PCA_final_log_scores <- data.frame(PCA_final_log$variates$X, metadata_filter)
+
+# Plot PCA
+PCA_logTA_SampleType <- PCA_final_log_scores %>%
+  ggscatter(x = "PC1", y = "PC2", title = "PCA - Total Area and Log Transformed",
+            color = "SampleType", alpha = 0.7,
+            xlab = paste("PC1 (", round(PCA_final_log$prop_expl_var$X[1]*100, digits = 1),"%)", sep = ""), 
+            ylab = paste("PC2 (", round(PCA_final_log$prop_expl_var$X[2]*100, digits = 1),"%)", sep = ""),
+            legend.title = "SampleType", ggtheme = theme_classic()) +
+  geom_point(data = PCA_final_log_scores %>% group_by(SampleType) %>% 
+               summarise_at(vars(matches("PC")), mean), aes(PC1, PC2, color = SampleType), size = 3, shape = 8) +
+  theme(plot.title = element_text(size = 8), axis.title = element_text(size = 5), axis.text = element_text(size = 6),
+        legend.title = element_text(size = 6), legend.text = element_text(size = 5)) + coord_fixed()
+
+PCA_logTA_Location <- PCA_final_log_scores %>%
+  ggscatter(x = "PC1", y = "PC2", title = "PCA - Total Area and Log Transformed",
+            color = "Location", alpha = 0.7,
+            xlab = paste("PC1 (", round(PCA_final_log$prop_expl_var$X[1]*100, digits = 1),"%)", sep = ""), 
+            ylab = paste("PC2 (", round(PCA_final_log$prop_expl_var$X[2]*100, digits = 1),"%)", sep = ""),
+            legend.title = "Location", ggtheme = theme_classic()) +
+  geom_point(data = PCA_final_log_scores %>% group_by(Location) %>% 
+               summarise_at(vars(matches("PC")), mean), aes(PC1, PC2, color = Location), size = 3, shape = 8) +
+  theme(plot.title = element_text(size = 8), axis.title = element_text(size = 5), axis.text = element_text(size = 6),
+        legend.title = element_text(size = 6), legend.text = element_text(size = 5)) + coord_fixed()
+
+PCA_logTA_Date <- PCA_final_log_scores %>%
+  ggscatter(x = "PC1", y = "PC2", title = "PCA - Total Area and Log Transformed",
+            color = "Date", alpha = 0.7,
+            xlab = paste("PC1 (", round(PCA_final_log$prop_expl_var$X[1]*100, digits = 1),"%)", sep = ""), 
+            ylab = paste("PC2 (", round(PCA_final_log$prop_expl_var$X[2]*100, digits = 1),"%)", sep = ""),
+            legend.title = "Date", ggtheme = theme_classic()) +
+  geom_point(data = PCA_final_log_scores %>% group_by(Date) %>% 
+               summarise_at(vars(matches("PC")), mean), aes(PC1, PC2, color = Date), size = 3, shape = 8) +
+  theme(plot.title = element_text(size = 8), axis.title = element_text(size = 5), axis.text = element_text(size = 6),
+        legend.title = element_text(size = 6), legend.text = element_text(size = 5)) + coord_fixed()
+
+PCA_logTA_Time <- PCA_final_log_scores %>%
+  ggscatter(x = "PC1", y = "PC2", title = "PCA - Total Area and Log Transformed",
+            color = "Time", alpha = 0.7,
+            xlab = paste("PC1 (", round(PCA_final_log$prop_expl_var$X[1]*100, digits = 1),"%)", sep = ""), 
+            ylab = paste("PC2 (", round(PCA_final_log$prop_expl_var$X[2]*100, digits = 1),"%)", sep = ""),
+            legend.title = "Time", ggtheme = theme_classic()) +
+  geom_point(data = PCA_final_log_scores %>% group_by(Time) %>% 
+               summarise_at(vars(matches("PC")), mean), aes(PC1, PC2, color = Time), size = 3, shape = 8) +
+  theme(plot.title = element_text(size = 8), axis.title = element_text(size = 5), axis.text = element_text(size = 6),
+        legend.title = element_text(size = 6), legend.text = element_text(size = 5)) + coord_fixed()
+
+PCA_plotTAlog_Meta <- ggarrange(PCA_logTA_SampleType,PCA_logTA_Location, PCA_logTA_Date, PCA_logTA_Time)
+
+```
+
+Yes, overall structure improves after log transformation. 
+Variance between room air and breath is capture by component one while difference in date of collection are captured by component 2
+Little/no difference between location on whole data.
+Little/no difference on repeated measures on whole data.
+
+Is there is any difference on repeated measures in both morning and afternoon samples?
+
+```{r, eval=FALSE}
+
+set.seed(1234)
+
+metabolites_ra_pm <- filter(metabolites_log_TA, metadata_filter$Time %in% c("PM1", "PM2"))
+metadata_ra_pm <- filter(metadata_filter, metadata_filter$Time %in% c("PM1", "PM2"))
+ropls_ra_pm <- ropls::opls(x = metabolites_ra_pm, y = as.character(metadata_ra_pm$Time))
+
+metabolites_ra_am <- filter(metabolites_log_TA, metadata_filter$Time %in% c("AM1", "AM2") & metadata_filter$SampleType == "Room Air")
+metadata_ra_am <- filter(metadata_filter, metadata_filter$Time %in% c("AM1", "AM2") & metadata_filter$SampleType == "Room Air")
+ropls_ra_am <- ropls::opls(x = metabolites_ra_am, y = as.character(metadata_ra_am$Time))
+
+metabolites_b_am <- filter(metabolites_log_TA, metadata_filter$SampleType == "Breath")
+metadata_b_am <- filter(metadata_filter, metadata_filter$SampleType == "Breath")
+ropls_b_am <- ropls::opls(x = metabolites_b_am, y = as.character(metadata_b_am$Time))
+
+```
+
+All PLS-DA models are negative --> No differences in repeated measures --> Collapse repeated measures to mean.
+
+```{r, results=FALSE, message=FALSE}
+
+a <- data_filter %>% filter(SampleType == "Breath") %>%
+  group_by(Location, Date) %>% summarise_if(is.numeric, mean, na.rm = TRUE)
+
+b <- data_filter %>% filter(Time %in% c("AM1", "AM2") & SampleType == "Room Air") %>%
+  group_by(Location, Date) %>% summarise_if(is.numeric, mean, na.rm = TRUE)
+
+c <- data_filter %>% filter(Time %in% c("PM1", "PM2") & SampleType == "Room Air") %>%
+  group_by(Location, Date) %>% summarise_if(is.numeric, mean, na.rm = TRUE)
+
+a$Time <- "AM"
+a$SampleType <- "Breath"
+b$Time <- "AM"
+b$SampleType <- "Room Air"
+c$Time <- "PM"
+c$SampleType <- "Room Air"
+
+data_final <- rbind(a,b,c) %>%
+  as.data.frame() %>%
+  mutate(SampleID = seq(1:147)) %>%
+  relocate(Time, .after = Date) %>%
+  relocate(SampleType, .before = Location) %>%
+  relocate(SampleID, .before = SampleType)
+
+data_final[sapply(data_final, is.nan)] <- NA
+data_final$SampleType <- factor(data_final$SampleType, levels = c("Room Air", "Breath"))
+data_final$Time <- as.factor(data_final$Time)
+
+# Log transformation 
+metabolites_final_log <- log2(data_final[,6:118])
+metadata_final <- data_final[,1:5]
+
+# Total area normalisation
+sumSam_final_log <- rowSums(metabolites_final_log, na.rm = TRUE)
+sumSam_final_log[which(sumSam_final_log == 0)] <- 0.0001
+metabolites_final_log_TA <- metabolites_final_log/sumSam_final_log
+
+```
+
+PCA - final model (mean collapsed, log trnaformation and relative abundance normalisation)
+
+```{r}
+
+# PCA 
+PCA_final <- mixOmics::pca(metabolites_final_log_TA, ncomp = 2, center = TRUE, scale = TRUE) 
+PCA_final_scores <- data.frame(PCA_final$variates$X, metadata_final)
+
+# Plot PCA
+PCA_final_SampleType <- PCA_final_scores %>%
+  ggscatter(x = "PC1", y = "PC2", title = "PCA - Total Area and Log Transformed",
+            color = "SampleType", alpha = 0.7, ellipse = TRUE, label = "SampleID",
+            xlab = paste("PC1 (", round(PCA_final$prop_expl_var$X[1]*100, digits = 1),"%)", sep = ""), 
+            ylab = paste("PC2 (", round(PCA_final$prop_expl_var$X[2]*100, digits = 1),"%)", sep = ""),
+            legend.title = "SampleType", ggtheme = theme_classic()) +
+  geom_point(data = PCA_final_scores %>% group_by(SampleType) %>% 
+               summarise_at(vars(matches("PC")), mean), aes(PC1, PC2, color = SampleType), size = 3, shape = 8) +
+  theme(plot.title = element_text(size = 8), axis.title = element_text(size = 5), axis.text = element_text(size = 6),
+        legend.title = element_text(size = 6), legend.text = element_text(size = 5)) + coord_fixed()
+
+# Sample 110 is an outlier 
+data_final_filter <- filter(data_final, data_final$SampleID != 110)
+metabolites_final_log_TA_filter <- filter(metabolites_final_log_TA, metadata_final$SampleID != 110)
+metadata_final_filter <- filter(metadata_final, metadata_final$SampleID != 110)
+
+# PCA
+PCA_final_filter <- mixOmics::pca(metabolites_final_log_TA_filter, ncomp = 2, center = TRUE, scale = TRUE) 
+PCA_final_filter_scores <- data.frame(PCA_final_filter$variates$X, metadata_final_filter)
+
+# Plot PCA
+PCA_final_filter_SampleType <- PCA_final_filter_scores %>%
+  ggscatter(x = "PC1", y = "PC2", title = "PCA - Total Area and Log Transformed",
+            color = "SampleType", alpha = 0.7, 
+            xlab = paste("PC1 (", round(PCA_final_filter$prop_expl_var$X[1]*100, digits = 1),"%)", sep = ""), 
+            ylab = paste("PC2 (", round(PCA_final_filter$prop_expl_var$X[2]*100, digits = 1),"%)", sep = ""),
+            legend.title = "SampleType", ggtheme = theme_classic()) +
+  geom_point(data = PCA_final_filter_scores %>% group_by(SampleType) %>% 
+               summarise_at(vars(matches("PC")), mean), aes(PC1, PC2, color = SampleType), size = 3, shape = 8) +
+  theme(plot.title = element_text(size = 8), axis.title = element_text(size = 5), axis.text = element_text(size = 6),
+        legend.title = element_text(size = 6), legend.text = element_text(size = 5)) + coord_fixed()
+
+PCA_final_Location <- PCA_final_filter_scores %>%
+  ggscatter(x = "PC1", y = "PC2", title = "PCA - Total Area and Log Transformed",
+            color = "Location", alpha = 0.7,
+            xlab = paste("PC1 (", round(PCA_final_filter$prop_expl_var$X[1]*100, digits = 1),"%)", sep = ""), 
+            ylab = paste("PC2 (", round(PCA_final_filter$prop_expl_var$X[2]*100, digits = 1),"%)", sep = ""),
+            legend.title = "Location", ggtheme = theme_classic()) +
+  geom_point(data = PCA_final_filter_scores %>% group_by(Location) %>% 
+               summarise_at(vars(matches("PC")), mean), aes(PC1, PC2, color = Location), size = 3, shape = 8) +
+  theme(plot.title = element_text(size = 8), axis.title = element_text(size = 5), axis.text = element_text(size = 6),
+        legend.title = element_text(size = 6), legend.text = element_text(size = 5)) + coord_fixed()
+
+PCA_final_Date <- PCA_final_filter_scores %>%
+  ggscatter(x = "PC1", y = "PC2", title = "PCA - Total Area and Log Transformed",
+            color = "Date", alpha = 0.7,
+            xlab = paste("PC1 (", round(PCA_final_filter$prop_expl_var$X[1]*100, digits = 1),"%)", sep = ""), 
+            ylab = paste("PC2 (", round(PCA_final_filter$prop_expl_var$X[2]*100, digits = 1),"%)", sep = ""),
+            legend.title = "Date", ggtheme = theme_classic()) +
+  geom_point(data = PCA_final_filter_scores %>% group_by(Date) %>% 
+               summarise_at(vars(matches("PC")), mean), aes(PC1, PC2, color = Date), size = 3, shape = 8) +
+  theme(plot.title = element_text(size = 8), axis.title = element_text(size = 5), axis.text = element_text(size = 6),
+        legend.title = element_text(size = 6), legend.text = element_text(size = 5)) + coord_fixed()
+
+PCA_final_Time <- PCA_final_filter_scores %>%
+  ggscatter(x = "PC1", y = "PC2", title = "PCA - Total Area and Log Transformed",
+            color = "Time", alpha = 0.7,
+            xlab = paste("PC1 (", round(PCA_final_filter$prop_expl_var$X[1]*100, digits = 1),"%)", sep = ""), 
+            ylab = paste("PC2 (", round(PCA_final_filter$prop_expl_var$X[2]*100, digits = 1),"%)", sep = ""),
+            legend.title = "Time", ggtheme = theme_classic()) +
+  geom_point(data = PCA_final_filter_scores %>% group_by(Time) %>% 
+               summarise_at(vars(matches("PC")), mean), aes(PC1, PC2, color = Time), size = 3, shape = 8) +
+  theme(plot.title = element_text(size = 8), axis.title = element_text(size = 5), axis.text = element_text(size = 6),
+        legend.title = element_text(size = 6), legend.text = element_text(size = 5)) + coord_fixed()
+
+PCA_fina_plot <- ggarrange(PCA_final_filter_SampleType, PCA_final_Location, PCA_final_Date, PCA_final_Time)
+
+```
+
+Clear separation between breath and room air.
+Differences between locations appear to be minimum when considering whole dataset.
+Differences between collection dates are present as expected.
+Centroid PM skewed toward room air because no PM measurement for breath.
+
+# Breath vs Room Air
+
+```{r, results=FALSE, message=FALSE}
+
+set.seed(1234)
+
+# Only compare morning samples since no afternoon samples for breath were collected
+metabolites_ra_b <- filter(metabolites_final_log_TA_filter, metadata_final_filter$Time == "AM")
+metadata_ra_b <- filter(metadata_final_filter, metadata_final_filter$Time == "AM")
+
+# PLS-DA model
+plsda_ra_b <- ropls::opls(x = metabolites_ra_b, y = metadata_ra_b$SampleType, permI = 999)
+plsda_ra_b_scores <- data.frame(plsda_ra_b@scoreMN, metadata_ra_b$SampleType)
+colnames(plsda_ra_b_scores) <- c("PC1", "PC2", "SampleType")
+
+PLSDA_ra_b_plot <- plsda_ra_b_scores %>%
+  ggscatter(x = "PC1", y = "PC2", title = "PLS-DA - Breath vs Room Air",
+            color = "SampleType", alpha = 0.7, ellipse = TRUE,
+            xlab = paste("Component 1 (", round((plsda_ra_b@modelDF$R2X[1])*100, digits = 1),"%)", sep = ""), 
+            ylab = paste("Component 2 (", round((plsda_ra_b@modelDF$R2X[2])*100, digits = 1),"%)", sep = ""),
+            legend.title = "Sample Type", ggtheme = theme_classic()) +
+  geom_point(data = plsda_ra_b_scores %>% group_by(SampleType) %>% summarise_at(vars(matches("PC")), mean), 
+             aes(PC1, PC2, color = SampleType), size = 3, shape = 8) +
+  theme(plot.title = element_text(size = 9), axis.title = element_text(size = 7), axis.text = element_text(size = 7),
+        legend.title = element_text(size = 7), legend.text = element_text(size = 7)) + coord_fixed()
+
+# Extract VIP > 1
+plsda_ra_b_vip <- getVipVn(plsda_ra_b) %>% as.data.frame() %>% filter(. > 1)
+colnames(plsda_ra_b_vip) <- "VIP"
+plsda_ra_b_vip$Metabolite <- rownames(plsda_ra_b_vip)
+
+# Extract Loadings
+plsda_ra_b_loadings <- plsda_ra_b@loadingMN %>% as.data.frame() %>% select(p1)
+plsda_ra_b_loadings <- plsda_ra_b_loadings %>% mutate(SampleType = case_when(p1 > 0 ~ "Breath",
+                                                                             p1 < 0 ~ "Room Air"))
+plsda_ra_b_loadings$Metabolite <- rownames(plsda_ra_b_loadings)
+
+plsda_ra_b_final <- inner_join(plsda_ra_b_vip, plsda_ra_b_loadings, by = "Metabolite") %>%
+  relocate(Metabolite, .before = VIP) %>%
+  select(-c("p1"))
+
+```
+
+Perfect separation between breath and room air (R2Y = 0.97, Q2Y = 0.96, p < 0.001)
+62 metabolites with VIP > 1
+
+Save Figure 1
+
+```{r, eval=FALSE}
+
+ggsave(plot = PLSDA_ra_b_plot, filename = "Figure1.svg", device = "svg", dpi = "retina", height = 5, width = 5)
+
+```
+
+# Room Air - Morning vs Afternoon
+
+```{r, results=FALSE, message=FALSE}
+
+set.seed(1234)
+
+metabolites_ra <- filter(metabolites_final_log_TA_filter, metadata_final_filter$SampleType == "Room Air")
+metadata_ra <- filter(metadata_final_filter, metadata_final_filter$SampleType == "Room Air")
+
+# PLS-DA
+plsda_ra_time <- ropls::opls(x = metabolites_ra, y = metadata_ra$Time, predI = 2, permI = 999)
+plsda_ra_time_scores <- data.frame(plsda_ra_time@scoreMN, metadata_ra$Time)
+colnames(plsda_ra_time_scores) <- c("PC1", "PC2", "Time")
+
+PLSDA_ra_b_plot <- plsda_ra_time_scores %>%
+  ggscatter(x = "PC1", y = "PC2", title = "PLS-DA Room Air - Morning vs Afternoon",
+            color = "Time", alpha = 0.7, ellipse = TRUE,
+            xlab = paste("Component 1 (", round((plsda_ra_time@modelDF$R2X[1])*100, digits = 1),"%)", sep = ""), 
+            ylab = paste("Component 2 (", round((plsda_ra_time@modelDF$R2X[2])*100, digits = 1),"%)", sep = ""),
+            legend.title = "Time", ggtheme = theme_classic()) +
+  geom_point(data = plsda_ra_time_scores %>% group_by(Time) %>% summarise_at(vars(matches("PC")), mean), 
+             aes(PC1, PC2, color = Time), size = 3, shape = 8) +
+  theme(plot.title = element_text(size = 9), axis.title = element_text(size = 7), axis.text = element_text(size = 7),
+        legend.title = element_text(size = 7), legend.text = element_text(size = 7)) + coord_fixed()
+
+# Extract VIP > 1
+plsda_ra_time_vip <- getVipVn(plsda_ra_time) %>% as.data.frame() %>% filter(. > 1)
+colnames(plsda_ra_time_vip) <- "VIP"
+plsda_ra_time_vip$Metabolite <- rownames(plsda_ra_time_vip)
+
+# Use mixOmics to be sure to get correct group contribution for each metabolite
+plsda_ra_time_mix <- mixOmics::plsda(metabolites_ra, metadata_ra$Time, ncomp = 2, scale = TRUE)
+plsda_ra_time_scores_mix <- data.frame(plsda_ra_time_mix$variates, metadata_ra$Time)
+
+# Loadings
+plsda_ra_time_loadings_mix <- plotLoadings(plsda_ra_time_mix, contrib = "max", method = "mean", plot = FALSE) %>%
+  as.data.frame() %>% select(GroupContrib) 
+plsda_ra_time_loadings_mix <- plsda_ra_time_loadings_mix %>% mutate(Metabolite = rownames(plsda_ra_time_loadings_mix)) %>% 
+  filter(Metabolite %in% rownames(plsda_ra_time_vip))
+
+plsda_ra_time_final <- right_join(plsda_ra_time_vip, plsda_ra_time_loadings_mix, by = "Metabolite") %>%
+  relocate(Metabolite, .before = VIP)
+
+```
+
+Model separates morning and afternoon room air samples (R2Y = 0.46, Q2Y = 0.22, p < 0.001)
+45 metabolites with VIP > 1
+
+Save Figure 2
+
+```{r, eval=FALSE}
+
+ggsave(plot = PLSDA_ra_b_plot, filename = "Figure2.svg", device = "svg", dpi = "retina", height = 5, width = 5)
+
+```
+
+# Room Air - Locations
+
+```{r, results=FALSE, message=FALSE}
+
+# PCA
+PCA_roomair <- mixOmics::pca(metabolites_ra, ncomp = 2, center = TRUE, scale = TRUE) 
+PCA_ra_scores <- data.frame(PCA_roomair$variates$X, metadata_ra)
+
+# Plot PCA
+PCA_roomair_plot <- PCA_ra_scores %>%
+  ggscatter(x = "PC1", y = "PC2",
+            color = "Location", alpha = 0.5, title = "PCA Room Air - Location",
+            xlab = paste("PC1 (", round(PCA_roomair$prop_expl_var$X[1]*100, digits = 1),"%)", sep = ""), 
+            ylab = paste("PC2 (", round(PCA_roomair$prop_expl_var$X[2]*100, digits = 1),"%)", sep = ""),
+            legend.title = "Location", ggtheme = theme_classic()) +
+  geom_point(data = PCA_ra_scores %>% group_by(Location) %>% 
+               summarise_at(vars(matches("PC")), mean), aes(PC1, PC2, color = Location), size = 3, shape = 8) +
+  theme(plot.title = element_text(size = 9), axis.title = element_text(size = 7), axis.text = element_text(size = 7),
+        legend.title = element_text(size = 7), legend.text = element_text(size = 7)) + coord_fixed()
+
+# PERMANOVA --> significant
+dist_metabolites_ra <- vegdist(metabolites_ra, method = "euclidean", na.rm = TRUE)
+permanova_roomair <- adonis2(dist_metabolites_ra ~ metadata_ra$Location, metadata_ra, na.action = na.omit)
+
+# Check dispersion --> no significant difference
+disper_roomair <- betadisper(dist_metabolites_ra, metadata_ra$Location)
+anova(disper_roomair)
+TukeyHSD(disper_roomair)
+
+# ANOSIM --> significant
+anosim_roomair <- anosim(dist_metabolites_ra, metadata_ra$Location) 
+
+```
+
+PLS-DA by location
+
+```{r}
+
+# PLS-DA
+plsda_ra_location <- mixOmics::plsda(X = metabolites_ra, Y = metadata_ra$Location, ncomp = 2, scale = TRUE)
+plsda_ra_location_scores <- data.frame(plsda_ra_location$variates$X, metadata_ra$Location)
+colnames(plsda_ra_location_scores) <- c("PC1", "PC2", "Location")
+
+PLSDA_location_plot <- plsda_ra_location_scores %>%
+  ggscatter(x = "PC1", y = "PC2", title = "PLS-DA Room Air - Location", color = "Location", alpha = 0.7,
+            xlab = paste("Component 1 (", round(plsda_ra_location$prop_expl_var$X[1]*100, digits = 1),"%)", sep = ""), 
+            ylab = paste("Component 2 (", round(plsda_ra_location$prop_expl_var$X[2]*100, digits = 1),"%)", sep = ""), 
+            legend.title = "Location", ggtheme = theme_classic()) +
+  geom_point(data = plsda_ra_location_scores %>% group_by(Location) %>% summarise_at(vars(matches("PC")), mean), 
+             aes(PC1, PC2, color = Location), size = 3, shape = 8) +
+  theme(plot.title = element_text(size = 9), axis.title = element_text(size = 7), axis.text = element_text(size = 7),
+        legend.title = element_text(size = 7), legend.text = element_text(size = 7)) + coord_fixed()
+
+```
+
+Save Figure 3A
+
+```{r, eval=FALSE}
+
+ggsave(plot = PCA_roomair_plot, filename = "Figure3A.svg", device = "svg", dpi = "retina", height = 5, width = 5)
+
+```
+
+Check pairwise PLS-DA for all the locations
+
+```{r, results=FALSE, message=FALSE}
+
+# endoscopy unit vs liver research unit
+metabolites_ra_EL <- filter(metabolites_ra, metadata_ra$Location %in% c("endoscopy unit", "liver research unit"))
+metadata_ra_EL <- filter(metadata_ra, metadata_ra$Location %in% c("endoscopy unit", "liver research unit"))
+ropls_EL <- ropls::opls(metabolites_ra_EL, as.character(metadata_ra_EL$Location))
+
+# endoscopy unit vs main operating theaters 
+metabolites_ra_EO <- filter(metabolites_ra, metadata_ra$Location %in% c("endoscopy unit", "main operating theatres"))
+metadata_ra_EO <- filter(metadata_ra, metadata_ra$Location %in% c("endoscopy unit", "main operating theatres"))
+ropls_EO <- ropls::opls(metabolites_ra_EO, as.character(metadata_ra_EO$Location))
+
+# endoscopy unit vs mass spec lab
+metabolites_ra_ES <- filter(metabolites_ra, metadata_ra$Location %in% c("endoscopy unit", "mass spectrometry laboratory"))
+metadata_ra_ES <- filter(metadata_ra, metadata_ra$Location %in% c("endoscopy unit", "mass spectrometry laboratory"))
+ropls_ES <- ropls::opls(metabolites_ra_ES, as.character(metadata_ra_ES$Location))
+
+# endoscopy unit vs paterson
+metabolites_ra_EP <- filter(metabolites_ra, metadata_ra$Location %in% c("endoscopy unit", "paterson building outpatient clinic"))
+metadata_ra_EP <- filter(metadata_ra, metadata_ra$Location %in% c("endoscopy unit", "paterson building outpatient clinic"))
+ropls_EP <- ropls::opls(metabolites_ra_EP, as.character(metadata_ra_EP$Location))
+
+# liver research unit vs main operating theaters
+metabolites_ra_LO <- filter(metabolites_ra, metadata_ra$Location %in% c("liver research unit", "main operating theatres"))
+metadata_ra_LO <- filter(metadata_ra, metadata_ra$Location %in% c("liver research unit", "main operating theatres"))
+ropls_LO <- ropls::opls(metabolites_ra_LO, as.character(metadata_ra_LO$Location))
+
+# liver research unit vs mass spectrometer laboratory
+metabolites_ra_LS <- filter(metabolites_ra, metadata_ra$Location %in% c("liver research unit", "mass spectrometry laboratory"))
+metadata_ra_LS <- filter(metadata_ra, metadata_ra$Location %in% c("liver research unit", "mass spectrometry laboratory"))
+ropls_LS <- ropls::opls(metabolites_ra_LS, as.character(metadata_ra_LS$Location))
+
+# liver research unit vs paterson
+metabolites_ra_LP <- filter(metabolites_ra, metadata_ra$Location %in% c("liver research unit", "paterson building outpatient clinic"))
+metadata_ra_LP <- filter(metadata_ra, metadata_ra$Location %in% c("liver research unit", "paterson building outpatient clinic"))
+ropls_LP <- ropls::opls(metabolites_ra_LP, as.character(metadata_ra_LP$Location))
+
+# main operating theaters vs mass spectrometry laboratory
+metabolites_ra_OS <- filter(metabolites_ra, metadata_ra$Location %in% c("main operating theatres", "mass spectrometry laboratory"))
+metadata_ra_OS <- filter(metadata_ra, metadata_ra$Location %in% c("main operating theatres", "mass spectrometry laboratory"))
+ropls_OS <- ropls::opls(metabolites_ra_OS, as.character(metadata_ra_OS$Location))
+
+# main operating theaters vs paterson 
+metabolites_ra_OP <- filter(metabolites_ra, metadata_ra$Location %in% c("main operating theatres", 
+                                                                        "paterson building outpatient clinic"))
+metadata_ra_OP <- filter(metadata_ra, metadata_ra$Location %in% c("main operating theatres", 
+                                                                  "paterson building outpatient clinic"))
+ropls_OP <- ropls::opls(metabolites_ra_OP, as.character(metadata_ra_OP$Location))
+
+# mass spectrometer laboratory vs paterson 
+metabolites_ra_SP <- filter(metabolites_ra, metadata_ra$Location %in% c("mass spectrometry laboratory", 
+                                                                        "paterson building outpatient clinic"))
+metadata_ra_SP <- filter(metadata_ra, metadata_ra$Location %in% c("mass spectrometry laboratory", 
+                                                                  "paterson building outpatient clinic"))
+
+ropls_SP <- ropls::opls(metabolites_ra_SP, as.character(metadata_ra_SP$Location))
+
+```
+
+All models are positive and significant (min R2Y = 0.77, min Q2Y = 0.56, p < 0.05).
+
+Extract all VIPs and loadings from PLS-DA models
+
+```{r}
+
+# VIP
+metabolites_ra_EL_vip <- getVipVn(ropls_EL) %>% as.data.frame() %>% filter(. > 1)
+colnames(metabolites_ra_EL_vip) <- "VIP"
+metabolites_ra_EL_vip$Metabolite <- rownames(metabolites_ra_EL_vip)
+
+# Loadings
+ropls_EL_loadings <- ropls_EL@loadingMN %>% as.data.frame() %>% select(p1)
+ropls_EL_loadings <- ropls_EL_loadings %>% mutate(SampleType = case_when(p1 > 0 ~ "Liver Research Unit",
+                                                                         p1 < 0 ~ "Endoscopy Unit"))
+ropls_EL_loadings$Metabolite <- rownames(ropls_EL_loadings)
+ropls_EL_final <- inner_join(metabolites_ra_EL_vip, ropls_EL_loadings, by = "Metabolite") %>%
+  relocate(Metabolite, .before = VIP) %>%
+  select(-c("p1"))
+
+# VIP
+metabolites_ra_EO_vip <- getVipVn(ropls_EO) %>% as.data.frame() %>% filter(. > 1)
+colnames(metabolites_ra_EO_vip) <- "VIP"
+metabolites_ra_EO_vip$Metabolite <- rownames(metabolites_ra_EO_vip)
+
+# Loadings
+ropls_EO_loadings <- ropls_EO@loadingMN %>% as.data.frame() %>% select(p1)
+ropls_EO_loadings <- ropls_EO_loadings %>% mutate(SampleType = case_when(p1 > 0 ~ "Main Operating Theatres",
+                                                                         p1 < 0 ~ "Endoscopy Unit"))
+ropls_EO_loadings$Metabolite <- rownames(ropls_EO_loadings)
+ropls_EO_final <- inner_join(metabolites_ra_EO_vip, ropls_EO_loadings, by = "Metabolite") %>%
+  relocate(Metabolite, .before = VIP) %>%
+  select(-c("p1"))
+
+# VIP
+metabolites_ra_ES_vip <- getVipVn(ropls_ES) %>% as.data.frame() %>% filter(. > 1)
+colnames(metabolites_ra_ES_vip) <- "VIP"
+metabolites_ra_ES_vip$Metabolite <- rownames(metabolites_ra_ES_vip)
+
+# Loadings
+ropls_ES_loadings <- ropls_ES@loadingMN %>% as.data.frame() %>% select(p1)
+ropls_ES_loadings <- ropls_ES_loadings %>% mutate(SampleType = case_when(p1 > 0 ~ "Mass Spectrometry Laboratory",
+                                                                         p1 < 0 ~ "Endoscopy Unit"))
+ropls_ES_loadings$Metabolite <- rownames(ropls_ES_loadings)
+ropls_ES_final <- inner_join(metabolites_ra_ES_vip, ropls_ES_loadings, by = "Metabolite") %>%
+  relocate(Metabolite, .before = VIP) %>%
+  select(-c("p1"))
+
+# VIP
+metabolites_ra_EP_vip <- getVipVn(ropls_EP) %>% as.data.frame() %>% filter(. > 1)
+colnames(metabolites_ra_EP_vip) <- "VIP"
+metabolites_ra_EP_vip$Metabolite <- rownames(metabolites_ra_EP_vip)
+
+# Loadings
+ropls_EP_loadings <- ropls_EP@loadingMN %>% as.data.frame() %>% select(p1)
+ropls_EP_loadings <- ropls_EP_loadings %>% mutate(SampleType = case_when(p1 > 0 ~ "Paterson Building Outpatient Clinic",
+                                                                         p1 < 0 ~ "Endoscopy Unit"))
+ropls_EP_loadings$Metabolite <- rownames(ropls_EP_loadings)
+ropls_EP_final <- inner_join(metabolites_ra_EP_vip, ropls_EP_loadings, by = "Metabolite") %>%
+  relocate(Metabolite, .before = VIP) %>%
+  select(-c("p1"))
+
+# VIP
+metabolites_ra_LO_vip <- getVipVn(ropls_LO) %>% as.data.frame() %>% filter(. > 1)
+colnames(metabolites_ra_LO_vip) <- "VIP"
+metabolites_ra_LO_vip$Metabolite <- rownames(metabolites_ra_LO_vip)
+
+# Loadings
+ropls_LO_loadings <- ropls_LO@loadingMN %>% as.data.frame() %>% select(p1)
+ropls_LO_loadings <- ropls_LO_loadings %>% mutate(SampleType = case_when(p1 > 0 ~ "Main Operating Theatres",
+                                                                         p1 < 0 ~ "Liver Research Unit"))
+ropls_LO_loadings$Metabolite <- rownames(ropls_LO_loadings)
+ropls_LO_final <- inner_join(metabolites_ra_LO_vip, ropls_LO_loadings, by = "Metabolite") %>%
+  relocate(Metabolite, .before = VIP) %>%
+  select(-c("p1"))
+
+# VIP
+metabolites_ra_LS_vip <- getVipVn(ropls_LS) %>% as.data.frame() %>% filter(. > 1)
+colnames(metabolites_ra_LS_vip) <- "VIP"
+metabolites_ra_LS_vip$Metabolite <- rownames(metabolites_ra_LS_vip)
+
+# Loadings
+ropls_LS_loadings <- ropls_LS@loadingMN %>% as.data.frame() %>% select(p1)
+ropls_LS_loadings <- ropls_LS_loadings %>% mutate(SampleType = case_when(p1 > 0 ~ "Mass Spectrometry Laboratory",
+                                                                         p1 < 0 ~ "Liver Research Unit"))
+ropls_LS_loadings$Metabolite <- rownames(ropls_LS_loadings)
+ropls_LS_final <- inner_join(metabolites_ra_LS_vip, ropls_LS_loadings, by = "Metabolite") %>%
+  relocate(Metabolite, .before = VIP) %>%
+  select(-c("p1"))
+
+# VIP
+metabolites_ra_LP_vip <- getVipVn(ropls_LP) %>% as.data.frame() %>% filter(. > 1)
+colnames(metabolites_ra_LP_vip) <- "VIP"
+metabolites_ra_LP_vip$Metabolite <- rownames(metabolites_ra_LP_vip)
+
+# Loadings
+ropls_LP_loadings <- ropls_LP@loadingMN %>% as.data.frame() %>% select(p1)
+ropls_LP_loadings <- ropls_LP_loadings %>% mutate(SampleType = case_when(p1 > 0 ~ "Paterson Building Outpatient Clinic",
+                                                                         p1 < 0 ~ "Liver Research Unit"))
+ropls_LP_loadings$Metabolite <- rownames(ropls_LP_loadings)
+ropls_LP_final <- inner_join(metabolites_ra_LP_vip, ropls_LP_loadings, by = "Metabolite") %>%
+  relocate(Metabolite, .before = VIP) %>%
+  select(-c("p1"))
+
+# VIP
+metabolites_ra_OS_vip <- getVipVn(ropls_OS) %>% as.data.frame() %>% filter(. > 1)
+colnames(metabolites_ra_OS_vip) <- "VIP"
+metabolites_ra_OS_vip$Metabolite <- rownames(metabolites_ra_OS_vip)
+
+# Loadings
+ropls_OS_loadings <- ropls_OS@loadingMN %>% as.data.frame() %>% select(p1)
+ropls_OS_loadings <- ropls_OS_loadings %>% mutate(SampleType = case_when(p1 > 0 ~ "Mass Spectrometry Laboratory",
+                                                                         p1 < 0 ~ "Main Operating Theatres"))
+ropls_OS_loadings$Metabolite <- rownames(ropls_OS_loadings)
+ropls_OS_final <- inner_join(metabolites_ra_OS_vip, ropls_OS_loadings, by = "Metabolite") %>%
+  relocate(Metabolite, .before = VIP) %>%
+  select(-c("p1"))
+
+# VIP
+metabolites_ra_OP_vip <- getVipVn(ropls_OP) %>% as.data.frame() %>% filter(. > 1)
+colnames(metabolites_ra_OP_vip) <- "VIP"
+metabolites_ra_OP_vip$Metabolite <- rownames(metabolites_ra_OP_vip)
+
+# Loadings
+ropls_OP_loadings <- ropls_OP@loadingMN %>% as.data.frame() %>% select(p1)
+ropls_OP_loadings <- ropls_OP_loadings %>% mutate(SampleType = case_when(p1 > 0 ~ "Paterson Building Outpatient Clinic",
+                                                                         p1 < 0 ~ "Main Operating Theatres"))
+ropls_OP_loadings$Metabolite <- rownames(ropls_OP_loadings)
+ropls_OP_final <- inner_join(metabolites_ra_OP_vip, ropls_OP_loadings, by = "Metabolite") %>%
+  relocate(Metabolite, .before = VIP) %>%
+  select(-c("p1"))
+
+# VIP
+metabolites_ra_SP_vip <- getVipVn(ropls_SP) %>% as.data.frame() %>% filter(. > 1)
+colnames(metabolites_ra_SP_vip) <- "VIP"
+metabolites_ra_SP_vip$Metabolite <- rownames(metabolites_ra_SP_vip)
+
+# Loadings
+ropls_SP_loadings <- ropls_SP@loadingMN %>% as.data.frame() %>% select(p1)
+ropls_SP_loadings <- ropls_SP_loadings %>% mutate(SampleType = case_when(p1 > 0 ~ "Paterson Building Outpatient Clinic",
+                                                                         p1 < 0 ~ "Mass Spectrometry Laboratory"))
+ropls_SP_loadings$Metabolite <- rownames(ropls_SP_loadings)
+ropls_SP_final <- inner_join(metabolites_ra_SP_vip, ropls_SP_loadings, by = "Metabolite") %>%
+  relocate(Metabolite, .before = VIP) %>%
+  select(-c("p1"))
+
+```
+
+Define characteristic VOCs for each location.
+
+```{r}
+
+# Commonly shared metabolites
+EndoscopyUnit_ra_vip <- inner_join(ropls_EL_final, ropls_EO_final, by = "Metabolite") %>%
+  inner_join(ropls_ES_final, by = "Metabolite") %>%
+  inner_join(ropls_EP_final, by = "Metabolite")
+
+LiverResearchUnit_ra_vip <- inner_join(ropls_EL_final, ropls_LO_final, by = "Metabolite") %>%
+  inner_join(ropls_LS_final, by = "Metabolite") %>%
+  inner_join(ropls_LP_final, by = "Metabolite")
+
+MainOperatingTheater_ra_vip <- inner_join(ropls_EO_final, ropls_LO_final, by = "Metabolite") %>%
+  inner_join(ropls_OS_final, by = "Metabolite") %>%
+  inner_join(ropls_OP_final, by = "Metabolite")
+
+MassSpectrometryLab_ra_vip <- inner_join(ropls_ES_final, ropls_LS_final, by = "Metabolite") %>%
+  inner_join(ropls_OS_final, by = "Metabolite") %>%
+  inner_join(ropls_SP_final, by = "Metabolite")
+
+PatersonBulding_ra_vip <- inner_join(ropls_EP_final, ropls_LP_final, by = "Metabolite") %>%
+  inner_join(ropls_OP_final, by = "Metabolite") %>%
+  inner_join(ropls_SP_final, by = "Metabolite")
+
+Location_ra <- inner_join(EndoscopyUnit_ra_vip, LiverResearchUnit_ra_vip, by = "Metabolite") %>%
+  inner_join(MainOperatingTheater_ra_vip, by = "Metabolite") %>%
+  inner_join(PatersonBulding_ra_vip, by = "Metabolite")
+
+```
+
+Save results
+
+```{r, eval=FALSE}
+
+write_csv(x = EndoscopyUnit_ra_vip, file = "EndoscopyUnit_VIP_Loadings.csv")
+write_csv(x = LiverResearchUnit_ra_vip, file = "LiverResearchUnit_VIP_Loadings.csv")
+write_csv(x = MainOperatingTheater_ra_vip, file = "MainOperatingTheater_VIP_Loadings.csv")
+write_csv(x = MassSpectrometryLab_ra_vip, file = "MassSpectrometryLab_VIP_Loadings.csv")
+write_csv(x = PatersonBulding_ra_vip, file = "PatersonBulding_VIP_Loadings.csv")
+
+```
+
+# Breath - Locations
+
+PCA
+
+```{r, results=FALSE, message=FALSE}
+
+set.seed(1234)
+
+metabolites_breath <- filter(metabolites_final_log_TA_filter, metadata_final_filter$SampleType == "Breath")
+metadata_breath <- filter(metadata_final_filter, metadata_final_filter$SampleType == "Breath")
+
+# PCA
+PCA_breath <- mixOmics::pca(metabolites_breath, ncomp = 2, center = TRUE, scale = TRUE) 
+PCA_breath_scores <- data.frame(PCA_breath$variates$X, metadata_breath)
+
+# Plot PCA
+PCA_breath_plot <- PCA_breath_scores %>%
+  ggscatter(x = "PC1", y = "PC2",
+            color = "Location", alpha = 0.5, title = "PCA Breath - Location",
+            xlab = paste("PC1 (", round(PCA_breath$prop_expl_var$X[1]*100, digits = 1),"%)", sep = ""), 
+            ylab = paste("PC2 (", round(PCA_breath$prop_expl_var$X[2]*100, digits = 1),"%)", sep = ""),
+            legend.title = "Location", ggtheme = theme_classic()) +
+  geom_point(data = PCA_breath_scores %>% group_by(Location) %>% 
+               summarise_at(vars(matches("PC")), mean), aes(PC1, PC2, color = Location), size = 3, shape = 8) +
+  theme(plot.title = element_text(size = 9), axis.title = element_text(size = 7), axis.text = element_text(size = 7),
+        legend.title = element_text(size = 7), legend.text = element_text(size = 7)) + coord_fixed()
+
+# PERMANOVA --> not significant
+dist_metabolites_breath <- vegdist(metabolites_breath, method = "euclidean", na.rm = TRUE)
+permanova_breath <- adonis2(dist_metabolites_breath ~ metadata_breath$Location, metadata_breath, na.action = na.omit)
+
+# Check dispersion --> no significant difference
+disper_breath <- betadisper(dist_metabolites_breath, metadata_breath$Location)
+anova(disper_breath)
+TukeyHSD(disper_breath)
+
+# ANOSIM --> not significant
+anosim_breath <- anosim(dist_metabolites_breath, metadata_breath$Location)
+
+```
+
+Save Figure 3B
+
+```{r, eval=FALSE}
+
+ggsave(plot = PCA_breath_plot, filename = "Figure3B.svg", device = "svg", dpi = "retina", height = 5, width = 5)
+
+```
+
+Pairwise PLS-DA of breath between locations
+
+```{r, eval=FALSE}
+
+# endoscopy unit vs liver research unit
+metabolites_breath_EL <- filter(metabolites_breath, metadata_breath$Location %in% c("endoscopy unit", "liver research unit"))
+metadata_breath_EL <- filter(metadata_breath, metadata_breath$Location %in% c("endoscopy unit", "liver research unit"))
+ropls_EL <- ropls::opls(metabolites_breath_EL, as.character(metadata_breath_EL$Location))
+
+# endoscopy unit vs main operating theaters 
+metabolites_breath_EO <- filter(metabolites_breath, metadata_breath$Location %in% c("endoscopy unit", "main operating theatres"))
+metadata_breath_EO <- filter(metadata_breath, metadata_breath$Location %in% c("endoscopy unit", "main operating theatres"))
+ropls_EO <- ropls::opls(metabolites_breath_EO, as.character(metadata_breath_EO$Location))
+
+# endoscopy unit vs mass spec lab
+metabolites_breath_ES <- filter(metabolites_breath, metadata_breath$Location %in% c("endoscopy unit", "mass spectrometry laboratory"))
+metadata_breath_ES <- filter(metadata_breath, metadata_breath$Location %in% c("endoscopy unit", "mass spectrometry laboratory"))
+ropls::opls(metabolites_breath_ES, as.character(metadata_breath_ES$Location))
+
+# endoscopy unit vs paterson
+metabolites_breath_EP <- filter(metabolites_breath, metadata_breath$Location %in% c("endoscopy unit", 
+                                                                                    "paterson building outpatient clinic"))
+metadata_breath_EP <- filter(metadata_breath, metadata_breath$Location %in% c("endoscopy unit", 
+                                                                              "paterson building outpatient clinic"))
+ropls::opls(metabolites_breath_EP, as.character(metadata_breath_EP$Location))
+
+# liver research unit vs main operating theaters
+metabolites_breath_LO <- filter(metabolites_breath, metadata_breath$Location %in% c("liver research unit", "main operating theatres"))
+metadata_breath_LO <- filter(metadata_breath, metadata_breath$Location %in% c("liver research unit", "main operating theatres"))
+ropls_LO <- ropls::opls(metabolites_breath_LO, as.character(metadata_breath_LO$Location))
+
+# liver research unit vs mass spectrometery laboratory
+metabolites_breath_LS <- filter(metabolites_breath, metadata_breath$Location %in% c("liver research unit", 
+                                                                                    "mass spectrometry laboratory"))
+metadata_breath_LS <- filter(metadata_breath, metadata_breath$Location %in% c("liver research unit", 
+                                                                              "mass spectrometry laboratory"))
+ropls_LS <- ropls::opls(metabolites_breath_LS, as.character(metadata_breath_LS$Location))
+
+# liver research unit vs paterson
+metabolites_breath_LP <- filter(metabolites_breath, metadata_breath$Location %in% c("liver research unit", 
+                                                                                    "paterson building outpatient clinic"))
+metadata_breath_LP <- filter(metadata_breath, metadata_breath$Location %in% c("liver research unit", 
+                                                                              "paterson building outpatient clinic"))
+ropls_LP <- ropls::opls(metabolites_breath_LP, as.character(metadata_breath_LP$Location))
+
+# main operating theaters vs mass spectrometry laboratory
+metabolites_breath_OS <- filter(metabolites_breath, metadata_breath$Location %in% c("main operating theatres", 
+                                                                                    "mass spectrometry laboratory"))
+metadata_breath_OS <- filter(metadata_breath, metadata_breath$Location %in% c("main operating theatres", 
+                                                                              "mass spectrometry laboratory"))
+ropls_OS <- ropls::opls(metabolites_breath_OS, as.character(metadata_breath_OS$Location))
+
+# main operating theaters vs paterson 
+metabolites_breath_OP <- filter(metabolites_breath, metadata_breath$Location %in% c("main operating theatres", 
+                                                                                    "paterson building outpatient clinic"))
+metadata_breath_OP <- filter(metadata_breath, metadata_breath$Location %in% c("main operating theatres", 
+                                                                              "paterson building outpatient clinic"))
+ropls_OP <- ropls::opls(metabolites_breath_OP, as.character(metadata_breath_OP$Location))
+
+# mass spectrometer laboratory vs paterson 
+metabolites_breath_SP <- filter(metabolites_breath, metadata_breath$Location %in% c("mass spectrometry laboratory", 
+                                                                                    "paterson building outpatient clinic"))
+metadata_breath_SP <- filter(metadata_breath, metadata_breath$Location %in% c("mass spectrometry laboratory", 
+                                                                              "paterson building outpatient clinic"))
+ropls_SP <- ropls::opls(metabolites_breath_SP, as.character(metadata_breath_SP$Location))
+
+```
+
+All models are negative --> no significant difference between locations.
+
+# Univariate Analysis
+
+Make boxplots and calculate significant differeces for the VOCs of interest.
+
+```{r}
+
+Endoscopy <- EndoscopyUnit_ra_vip %>% dplyr::filter(SampleType.y.y == "Endoscopy Unit") %>% dplyr::select(Metabolite)
+LiverResearch <- LiverResearchUnit_ra_vip %>% dplyr::filter(SampleType.y == "Liver Research Unit") %>% dplyr::select(Metabolite)
+MainTheater <- MainOperatingTheater_ra_vip %>% dplyr::filter(SampleType.y == "Main Operating Theatres") %>% dplyr::select(Metabolite)
+MassSpec <- MassSpectrometryLab_ra_vip %>% dplyr::filter(SampleType.y == "Mass Spectrometry Laboratory") %>% dplyr::select(Metabolite)
+Paterson <- PatersonBulding_ra_vip %>% dplyr::filter(SampleType.y == "Paterson Building Outpatient Clinic") %>%
+  dplyr::select(Metabolite)
+
+# List VOCs of interest
+VOCs_interest <- rbind(Endoscopy, LiverResearch, MainTheater, MassSpec, Paterson)
+
+# Extract them from main table
+metabolites_ra_interest <- metabolites_ra %>% dplyr::select(VOCs_interest$Metabolite)
+metabolites_ra_interest_meta <- metabolites_ra_interest %>% dplyr::mutate(Location = metadata_ra$Location)
+
+# Rename locations
+metabolites_ra_interest_meta <- metabolites_ra_interest_meta %>% 
+  mutate(Loc_short = recode(Location, `endoscopy unit` = "EU", `liver research unit` = 'LR', `main operating theatres` =  'MO',
+                            `mass spectrometry laboratory` = "MS", `paterson building outpatient clinic` = "PB"))
+
+# Make boxplots
+boxplot_list <- list() 
+
+for (i in 1:30) {
+  
+  metabolites_temp <- metabolites_ra_interest_meta
+  colnames(metabolites_temp)[1:30] <-  paste0('metabolite', 1:30)
+  
+  form <- formula(paste0(colnames(metabolites_temp)[i], " ~ ", "Loc_short"))
+  
+  stat_test <- metabolites_temp %>%
+    wilcox_test(formula = form, p.adjust.method = "BH") %>%
+    add_xy_position(x = "Loc_short")
+  
+  plot_box <- metabolites_temp %>% 
+    ggboxplot(x = "Loc_short", y = metabolites_temp[i], title = VOCs_interest[i,], add = "jitter", legend = "none",
+              add.params = list(color = "Loc_short", alpha = 0.8, size = 1),
+              ylab = FALSE, xlab = FALSE) + 
+    stat_pvalue_manual(stat_test, label = "p.adj.signif", tip.length = 0.01, hide.ns = TRUE) +
+    theme(axis.text = element_text(size = 5), axis.title = element_text(size = 6),
+          plot.title = element_text(size = 7, hjust = 0.5))
+  
+  boxplot_list[[i]] <- plot_box  # add each plot into plot list
+  
+}
+
+boxplots_final <- wrap_plots(boxplot_list, ncol = 4)
+
+```
+
+Save Supplementary Figure 1
+
+```{r, eval=FALSE}
+
+ggsave(boxplots_final, filename = "Boxplots_VOCs.pdf", device = "pdf", dpi = "retina", width = 8, height = 18, limitsize = FALSE)
+
+```
+
+Session Info
+
+```{r, results=TRUE, message=TRUE}
+
+sessionInfo()
+
+```
+
